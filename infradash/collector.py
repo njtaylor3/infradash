@@ -1,6 +1,7 @@
 """Turns successive raw polls into a Snapshot with history and de-duplicated logs."""
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from collections import deque
@@ -10,6 +11,7 @@ from .health import find_issues
 from .models import Action, Event, MetricPanel
 
 HISTORY = 90
+UNCLAIMED_MAX_AGE_S = 30     # a finished poll nobody collected is still worth showing until then
 
 
 class _Dedup:
@@ -41,6 +43,10 @@ class Collector:
         self.guest_cpu: dict[str, deque] = {}
         self.fw = _Dedup(4000)
         self.pve = _Dedup(1000)
+        self.fw_guest: str | None = None        # the firewall's own VM, once it has been seen
+        self._errors_before: set[str] = set()
+        self._inflight: asyncio.Task | None = None
+        self._inflight_done_at = 0.0
 
     def _push(self, panel: str, row: str, value: float | None) -> None:
         if value is None:
@@ -48,7 +54,33 @@ class Collector:
         self.hist[panel].setdefault(row, deque(maxlen=HISTORY)).append(value)
 
     async def poll(self) -> Snapshot:
+        """Poll once. Polls never overlap and are never abandoned halfway: if the caller is
+        cancelled (the UI starts a new refresh while one is still running), the poll carries
+        on, and the next call collects its result instead of starting another. Cancelling a
+        poll midway would drop its HTTP connections and lose its counter samples."""
+        task = self._inflight
+        if task is not None and task.done() and \
+                time.monotonic() - self._inflight_done_at > UNCLAIMED_MAX_AGE_S:
+            if not task.cancelled():
+                task.exception()        # retrieve it, so asyncio doesn't warn that nobody did
+            task = None
+        if task is None:
+            task = self._inflight = asyncio.create_task(self._poll())
+            task.add_done_callback(self._poll_done)
+        try:
+            return await asyncio.shield(task)
+        finally:
+            if task.done() and self._inflight is task:
+                self._inflight = None
+
+    def _poll_done(self, task: asyncio.Task) -> None:
+        self._inflight_done_at = time.monotonic()
+
+    async def _poll(self) -> Snapshot:
         raw = await self.provider.poll()
+        errors = set(raw.errors)
+        raw.new_errors = [e for e in raw.errors if e not in self._errors_before]
+        self._errors_before = errors
         if raw.fw:
             self._push("cpu", raw.fw.name, raw.fw.cpu)
             self._push("mem", raw.fw.name, raw.fw.mem)
@@ -79,7 +111,9 @@ class Collector:
                         warn=80, crit=90),
         ]
         snap = build_snapshot(raw, list(self.fw.items), list(self.pve.items), metrics,
-                              {k: list(v) for k, v in self.guest_cpu.items()}, self.action_events)
+                              {k: list(v) for k, v in self.guest_cpu.items()}, self.action_events,
+                              fw_guest_hint=self.fw_guest)
+        self.fw_guest = snap.fw_guest
         now = time.time()
         issues = find_issues(snap, {k: list(v) for k, v in self.hist["cpu"].items()})
         live = {i.key for i in issues}
@@ -123,4 +157,7 @@ class Collector:
         return await self.provider.task_log(node, upid)
 
     async def close(self) -> None:
+        if self._inflight and not self._inflight.done():
+            self._inflight.cancel()
+            await asyncio.gather(self._inflight, return_exceptions=True)
         await self.provider.close()

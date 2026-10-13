@@ -1,11 +1,14 @@
-"""OPNsense REST API client (read-only).
+"""OPNsense REST API client.
 
 Uses the snake_case endpoints introduced in OPNsense 25.7 and falls back to the older
-camelCase names on 404, so it works on both.
+camelCase names on 404, so it works on both. The firewall log is fetched incrementally (only
+lines newer than the last one seen), which keeps responses small; see api.py for how a
+malformed (chunked) response is recovered.
 """
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import os
 import re
@@ -14,6 +17,8 @@ from datetime import datetime
 
 import httpx
 
+from .api import ApiClient, PollRun
+from .cache import LastGood, Rates, Refresher
 from .models import ArpEntry, FwEntry, FwStats, Gateway, Iface, Raw
 
 VLAN_DEV_RE = re.compile(r"(?:\.|^vlan0*)(\d{1,4})$")
@@ -59,6 +64,7 @@ def parse_interfaces(data) -> list[Iface]:
             key=key, name=r.get("description") or key.upper(), device=device,
             cidr=cidr or None, vlan=int(vlan) if vlan is not None else None,
             up=status not in ("down", "no carrier"),
+            mac=(r.get("macaddr") or r.get("macaddr_hw") or "").upper(),
         ))
     return out
 
@@ -69,6 +75,28 @@ def parse_arp(data) -> list[ArpEntry]:
                      device=r.get("intf") or r.get("interface") or "",
                      hostname=r.get("hostname") or "")
             for r in rows if r.get("ip") and r.get("mac") and r.get("expired") is not True]
+
+
+def parse_traffic(data) -> dict[str, tuple[float, float]]:
+    """Interface key -> (bytes received, bytes transmitted) counters."""
+    counters = {}
+    for key, row in ((data or {}).get("interfaces") or {}).items():
+        rx = _num(_first(row, "bytes received", "bytes_received", "inbytes", "rx_bytes"))
+        tx = _num(_first(row, "bytes transmitted", "bytes_transmitted", "outbytes", "tx_bytes"))
+        if rx is not None and tx is not None:
+            counters[key] = (rx, tx)
+    return counters
+
+
+def newest_digest(data) -> str | None:
+    """The __digest__ of the newest log row, to ask only for rows after it next time."""
+    rows = data.get("rows", []) if isinstance(data, dict) else (data or [])
+    newest = None
+    for r in rows:
+        if r.get("__digest__") and (newest is None or
+                                    str(r.get("__timestamp__", "")) > str(newest.get("__timestamp__", ""))):
+            newest = r
+    return newest["__digest__"] if newest else None
 
 
 def parse_fw_log(data) -> list[FwEntry]:
@@ -104,65 +132,49 @@ def parse_gateways(data) -> list[Gateway]:
 
 class OPNsenseClient:
     def __init__(self, cfg: dict, transport: httpx.AsyncBaseTransport | None = None) -> None:
-        url = cfg["url"].rstrip("/")
-        if not url.endswith("/api"):
-            url += "/api"
+        urls = cfg["url"] if isinstance(cfg["url"], list) else [cfg["url"]]
+        urls = [u.rstrip("/") if u.rstrip("/").endswith("/api") else u.rstrip("/") + "/api" for u in urls]
         key = os.environ.get("OPNSENSE_KEY") or cfg.get("key")
         secret = os.environ.get("OPNSENSE_SECRET") or cfg.get("secret")
         if not key or not secret:
             raise ValueError("opnsense: set key/secret in the config or OPNSENSE_KEY/OPNSENSE_SECRET")
-        self.client = httpx.AsyncClient(base_url=url, auth=(key, secret),
-                                        verify=cfg.get("verify_tls", True),
-                                        timeout=cfg.get("timeout", 10), transport=transport)
+        basic = base64.b64encode(f"{key}:{secret}".encode()).decode()
+        self.api = ApiClient(
+            "opnsense", urls, headers={"Authorization": f"Basic {basic}"},
+            verify=cfg.get("verify_tls", True), timeout=float(cfg.get("timeout", 10)),
+            http2=bool(cfg.get("http2", False)), transport=transport,
+            denied_hint=" (check the API user's privileges)")
         self.name = cfg.get("name", "opnsense")
         self.log_limit = int(cfg.get("log_limit", 500))
-        self._ifaces: tuple[float, list[Iface]] = (0.0, [])
-        self._prev_traffic: tuple[float, dict[str, tuple[float, float]]] | None = None
+        self.budget = float(cfg.get("slow_call_budget_s", 3))
+        self._slow = Refresher()
+        self._last = LastGood(float(cfg.get("stale_max_s", 60)))
+        self._rates = Rates(scale=8)          # bytes -> bits
+        self._log_digest: str | None = None
 
     async def _get(self, *paths: str, params: dict | None = None):
-        for path in paths:
-            r = await self.client.get(path, params=params)
-            if r.status_code == 404:
-                continue
-            if r.status_code in (401, 403):
-                raise RuntimeError(f"{path}: HTTP {r.status_code} (check the API user's privileges)")
-            if r.status_code >= 400:
-                raise RuntimeError(f"{path}: HTTP {r.status_code}")
-            return r.json()
-        raise RuntimeError(f"{paths[0]}: endpoint not found on this OPNsense version")
+        return await self.api.get_json(*paths, params=params)
 
     async def interfaces(self) -> list[Iface]:
-        ts, cached = self._ifaces
-        if time.time() - ts < 60 and cached:
-            return [Iface(**vars(i)) for i in cached]
-        data = await self._get("/interfaces/overview/interfaces_info",
-                               "/interfaces/overview/interfacesInfo")
-        ifaces = parse_interfaces(data)
-        self._ifaces = (time.time(), ifaces)
-        return [Iface(**vars(i)) for i in ifaces]
+        async def fetch():
+            return parse_interfaces(await self._get("/interfaces/overview/interfaces_info",
+                                                    "/interfaces/overview/interfacesInfo"))
+        ifaces = await self._slow.get("ifaces", 60, fetch, self.budget)
+        if ifaces is None and (err := self._slow.error("ifaces")):
+            raise err
+        return [Iface(**vars(i)) for i in ifaces or []]     # copies: traffic rates are set per poll
 
-    async def traffic(self) -> dict[str, tuple[float, float]]:
-        """Interface key -> (rx bit/s, tx bit/s), from counter deltas."""
+    async def _traffic(self) -> tuple[float, dict[str, tuple[float, float]]]:
         data = await self._get("/diagnostics/traffic/interface")
-        now = time.time()
-        counters = {}
-        for key, row in (data.get("interfaces") or {}).items():
-            rx = _num(_first(row, "bytes received", "bytes_received", "inbytes", "rx_bytes"))
-            tx = _num(_first(row, "bytes transmitted", "bytes_transmitted", "outbytes", "tx_bytes"))
-            if rx is not None and tx is not None:
-                counters[key] = (rx, tx)
-        rates = {}
-        if self._prev_traffic:
-            t0, prev = self._prev_traffic
-            dt = max(0.5, now - t0)
-            for key, (rx, tx) in counters.items():
-                if key in prev:
-                    rates[key] = (max(0.0, rx - prev[key][0]) * 8 / dt,
-                                  max(0.0, tx - prev[key][1]) * 8 / dt)
-        self._prev_traffic = (now, counters)
-        return rates
+        return time.time(), parse_traffic(data)
 
-    async def stats(self) -> FwStats:
+    async def _fw_log(self):
+        params = {"limit": self.log_limit}
+        if self._log_digest:
+            params["digest"] = self._log_digest
+        return await self._get("/diagnostics/firewall/log", params=params)
+
+    async def stats(self, run: PollRun | None = None) -> FwStats:
         st = FwStats(name=self.name)
 
         async def cpu():
@@ -187,47 +199,42 @@ class OPNsenseClient:
             st.states = int(cur) if cur is not None else None
             st.states_limit = int(lim) if lim else None
 
-        await asyncio.gather(cpu(), mem(), states(), return_exceptions=True)
+        if run is None:
+            await asyncio.gather(cpu(), mem(), states(), return_exceptions=True)
+        else:
+            await asyncio.gather(run("cpu", cpu(), keep=False), run("memory", mem(), keep=False),
+                                 run("states", states(), keep=False))
         return st
 
-    async def poll(self, raw: Raw) -> None:
-        async def guard(label, coro):
-            try:
-                return await coro
-            except Exception as e:  # noqa: BLE001
-                raw.errors.append(f"opnsense {label}: {e}")
-                return None
-
+    async def poll(self) -> Raw:
+        raw = Raw()
+        run = PollRun(self.api, raw, self._last)
         ifaces, traffic, gws, arp, log, stats = await asyncio.gather(
-            guard("interfaces", self.interfaces()),
-            guard("traffic", self.traffic()),
-            guard("gateways", self._get("/routes/gateway/status")),
-            guard("arp", self._get("/diagnostics/interface/get_arp",
-                                   "/diagnostics/interface/getArp")),
-            guard("firewall log", self._get("/diagnostics/firewall/log",
-                                            params={"limit": self.log_limit})),
-            guard("stats", self.stats()),
+            run("interfaces", self.interfaces()),
+            run("traffic", self._traffic()),
+            run("gateways", self._get("/routes/gateway/status")),
+            run("arp", self._get("/diagnostics/interface/get_arp", "/diagnostics/interface/getArp")),
+            run("firewall log", self._fw_log(), keep=False),
+            self.stats(run),
         )
         raw.ifaces = ifaces or []
-        for i in raw.ifaces:
-            i.rx_bps, i.tx_bps = (traffic or {}).get(i.key, (0.0, 0.0))
+        if traffic:
+            ts, counters = traffic
+            for i in raw.ifaces:
+                if i.key in counters:
+                    i.rx_bps, i.tx_bps = self._rates.update(i.key, ts, counters[i.key])
         raw.gateways = parse_gateways(gws) if gws else []
         raw.arp = parse_arp(arp) if arp else []
         raw.fw_log = parse_fw_log(log) if log else []
-        raw.fw = stats or FwStats(name=self.name)
+        # Only now, with the rows in this poll's result: next time, ask for what came after.
+        self._log_digest = newest_digest(log) or self._log_digest
+        raw.fw = stats
+        run.finish()
+        return raw
 
     # --- actions (only used when actions are enabled in the config) ----------
     async def _post(self, *paths: str, json: dict) -> dict:
-        for path in paths:
-            r = await self.client.post(path, json=json)
-            if r.status_code == 404:
-                continue
-            if r.status_code in (401, 403):
-                raise RuntimeError(f"permission denied (HTTP {r.status_code}) on {path}")
-            if r.status_code >= 400:
-                raise RuntimeError(f"{path}: HTTP {r.status_code} {r.text[:120]}")
-            return r.json() if r.content else {}
-        raise RuntimeError(f"{paths[0]}: endpoint not found on this OPNsense version")
+        return await self.api.post_json(*paths, json=json) or {}
 
     async def block_ip(self, alias: str, ip: str) -> str:
         """Add ip to a Host/Network/External alias. A rule must reference the alias for this to block."""
@@ -245,4 +252,5 @@ class OPNsenseClient:
         return f"dropped {dropped} states for {ip}" if dropped is not None else f"states for {ip} killed"
 
     async def close(self) -> None:
-        await self.client.aclose()
+        await self._slow.close()
+        await self.api.close()

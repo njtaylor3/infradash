@@ -33,6 +33,7 @@ class Snapshot:
     gw_iface: dict[str, str | None] = field(default_factory=dict)
     guest_cpu: dict[str, list[float]] = field(default_factory=dict)
     issues: list[Issue] = field(default_factory=list)
+    fw_guest: str | None = None                   # the guest the firewall runs in, if it's a VM
 
     # --- lookups -------------------------------------------------------------
     def node(self, eid: str) -> Node | None:
@@ -131,7 +132,8 @@ class Snapshot:
 
 def build_snapshot(raw: Raw, fw_entries: list[FwEntry], pve_logs: list[PveLog],
                    metrics: list[MetricPanel], guest_cpu: dict[str, list[float]],
-                   extra_events: list[Event] | None = None) -> Snapshot:
+                   extra_events: list[Event] | None = None,
+                   fw_guest_hint: str | None = None) -> Snapshot:
     snap = Snapshot(raw, metrics, [], guest_cpu=guest_cpu)
     dev_to_if = {i.device: i.key for i in raw.ifaces}
     nets = {i.key: i.network for i in raw.ifaces}
@@ -170,6 +172,11 @@ def build_snapshot(raw: Raw, fw_entries: list[FwEntry], pve_logs: list[PveLog],
             for ip in nic.ips:
                 ip_owner[ip] = g.id
                 guest_ips[g.id].append(ip)
+    # A virtualized firewall shares its NICs' MACs with its VM's config. When the firewall
+    # can't be reached (often because that VM is down), the last match stands in.
+    fw_macs = {i.mac.upper() for i in raw.ifaces if i.mac}
+    snap.fw_guest = next((mac_owner[m] for m in fw_macs if m in mac_owner), None) or (
+        fw_guest_hint if fw_guest_hint and fw_guest_hint in snap.names else None)
     arp_by_mac: dict[str, list[ArpEntry]] = defaultdict(list)
     for a in raw.arp:
         mac = a.mac.upper()

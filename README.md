@@ -32,7 +32,9 @@ on CPU or memory, storage over 80/90%, ZFS pools that aren't ONLINE or are over 
 or heavily fragmented, Ceph health warnings, down OSDs and Ceph usage, failing or stale ZFS
 replication, a firewall state table filling up, interfaces or gateways down, gateway packet
 loss or latency, a single source being blocked over and over (a scan or brute force), and
-tasks that failed in the last day.
+tasks that failed in the last day, an API that stopped answering (naming the firewall's VM
+when the firewall is virtualized and that VM is down), and HA trouble: a resource in error, a
+node being fenced, a guest being recovered or frozen, no active HA master, or a silent HA agent.
 
 **Topology map** (`v` toggles between two views of the same relationships):
 the network view is firewall → interfaces/VLANs → gateways, nodes, guests and other hosts
@@ -62,6 +64,29 @@ replaced by guest and host names.
 
 Guests that are stopped, or that the firewall can't see (e.g. on a bridge it isn't part of),
 appear in a separate "not seen by the firewall" group rather than being guessed.
+
+## Staying connected
+
+The dashboard is meant to be most useful when something is broken, so the API clients are
+built to keep working through it:
+
+- **Proxmox failover.** `url` can be a list, and with `discover_nodes: true` (the default) the
+  other cluster nodes are added as fallbacks: by their address on the same subnet as the
+  configured URL (so a dedicated Corosync network you can't reach is never used), or by
+  swapping node names into the hostname (`tower-1.home.arpa` → `tower-2.home.arpa`). If the
+  node you talk to goes down, the next poll uses another one.
+- **Nothing slow holds a poll up.** Guest configs, guest agents, ZFS, replication, Ceph and HA
+  are refreshed in the background; a poll waits for them at most `slow_call_budget_s` and
+  otherwise shows what it already has. A guest agent that hangs no longer stalls the dashboard.
+- **Short outages show the last data**, marked stale and counted in the attention list, for up
+  to `stale_max_s`, instead of an empty screen. One system failing never blanks the other.
+- **Flaky connections are retried.** Idle connections are dropped before pveproxy drops them,
+  and a GET that loses its connection is retried once on a fresh one.
+- **Malformed responses are recovered.** Some OPNsense responses arrive with broken chunked
+  encoding (`malformed chunk footer`). Responses are requested uncompressed, the firewall log
+  is fetched incrementally (only lines newer than the last one seen), and a GET whose response
+  is still malformed after a retry is re-read over HTTP/1.0, which has no chunked encoding;
+  that path then stays on HTTP/1.0. Setting `http2: true` is another way around it.
 
 ## Keys
 
@@ -103,7 +128,7 @@ Adding to the alias doesn't close existing connections; kill the address's state
 ## Credentials (read-only)
 
 **Proxmox** — an API token with the built-in `PVEAuditor` role is enough for everything
-except guest-agent IP lookups:
+(including HA status and finding the other nodes' addresses) except guest-agent IP lookups:
 
 ```bash
 pveum user add infradash@pve
@@ -138,6 +163,8 @@ a notification names the endpoint that returned 401/403, and that panel stays em
 
 ## Code layout
 
+- `infradash/api.py` — HTTP shared by both clients: retries, failover, the HTTP/1.0 fallback, typed errors
+- `infradash/cache.py` — background refresh with a time budget, counter rates, last-good values
 - `infradash/opnsense.py`, `infradash/proxmox.py` — API clients and response parsers
 - `infradash/correlate.py` — the join: IP/MAC ownership, network placement, event entities
 - `infradash/health.py` — the attention rules
@@ -146,3 +173,5 @@ a notification names the endpoint that returned 401/403, and that panel stays em
 - `infradash/views.py` — topology trees and the inspector
 - `infradash/demo.py` — the simulated homelab
 - `infradash/app.py` — the Textual UI
+- `tests/` — `pip install pytest && python -m pytest`; includes real-socket tests for the
+  malformed-response and dropped-connection cases

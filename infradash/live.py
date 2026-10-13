@@ -1,9 +1,12 @@
-"""Live provider: polls OPNsense and Proxmox concurrently into one Raw snapshot."""
+"""Live provider: polls OPNsense and Proxmox concurrently into one Raw snapshot.
+
+The two systems are polled independently: one being slow or down never costs the dashboard
+the other one's data."""
 from __future__ import annotations
 
 import asyncio
 
-from .models import Raw
+from .models import Raw, SourceStatus
 from .opnsense import OPNsenseClient
 from .proxmox import ProxmoxClient
 
@@ -21,10 +24,27 @@ class LiveProvider:
         self.block_alias = act.get("block_alias") if self.opn else None
         self.action_log = act.get("log_file", "~/.local/state/infradash/actions.log")
         self.has_pve, self.has_opn = self.pve is not None, self.opn is not None
+        # A backstop: each client already bounds its slow calls, so this only trips if an
+        # API accepts connections and then stops answering.
+        self.poll_timeout = float(cfg.get("poll_timeout_s", 20))
 
     async def poll(self) -> Raw:
         raw = Raw()
-        await asyncio.gather(*(c.poll(raw) for c in (self.opn, self.pve) if c))
+        clients = [c for c in (self.opn, self.pve) if c]
+        results = await asyncio.gather(*(asyncio.wait_for(c.poll(), self.poll_timeout) for c in clients),
+                                       return_exceptions=True)
+        for c, res in zip(clients, results):
+            if isinstance(res, Raw):
+                raw.merge(res)
+                continue
+            if isinstance(res, asyncio.CancelledError):
+                raise res
+            why = f"no answer within {self.poll_timeout:g}s" if isinstance(res, TimeoutError) else (
+                f"poll failed: {type(res).__name__}: {res}")
+            st = SourceStatus(**vars(c.api.status))
+            st.ok, st.error, st.stale = False, why, False
+            raw.sources[st.name] = st
+            raw.errors.append(f"{st.name}: {why}")
         return raw
 
     async def run_action(self, a) -> str:

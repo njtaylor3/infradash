@@ -8,10 +8,13 @@ opnsense:
   # secret: ...
   verify_tls: false                   # set true once the GUI has a trusted certificate
   name: opnsense                      # label used in the dashboard
-  log_limit: 500                      # firewall log lines fetched per poll
+  log_limit: 500                      # most firewall log lines fetched per poll (only new ones are asked for)
+  # http2: false                      # needs `pip install httpx[http2]`; another way around chunked-encoding bugs
 
 proxmox:
   url: https://192.168.1.11:8006      # any node; the API covers the whole cluster
+  # url: [https://192.168.1.11:8006, https://192.168.1.12:8006]   # or several, tried in order
+  discover_nodes: true                # also fail over to the other nodes, found through the API
   # token_id: infradash@pve!dash
   # token_secret: 00000000-0000-0000-0000-000000000000
   verify_tls: false
@@ -19,6 +22,13 @@ proxmox:
   config_refresh_s: 300               # how often guest NIC configs are re-read
 
 refresh: 5s
+
+# Connection behaviour (both sections take these; the defaults suit a LAN):
+#   timeout: 10                # seconds to wait for an answer (connecting gives up after 3)
+#   slow_call_budget_s: 3      # how long a poll waits for slow calls (guest configs and agents,
+#                              # ZFS, replication, Ceph, HA) before using what it already has
+#   stale_max_s: 60            # during an outage, keep showing the last data (marked stale) this long
+# poll_timeout_s: 20           # backstop for an API that accepts connections but never answers
 
 # Actions (x key). Off by default: the dashboard is read-only until you enable this AND give
 # the credentials write privileges. Every action needs an explicit confirmation; hard power-off
