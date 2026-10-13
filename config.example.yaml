@@ -1,0 +1,29 @@
+# infradash configuration — copy to config.yaml. Either section can be left out.
+# Secrets can come from the environment instead of this file:
+#   OPNSENSE_KEY / OPNSENSE_SECRET   and   PVE_TOKEN_ID / PVE_TOKEN_SECRET
+
+opnsense:
+  url: https://192.168.1.1            # /api is appended automatically
+  # key: ...                          # from System → Access → Users → API keys
+  # secret: ...
+  verify_tls: false                   # set true once the GUI has a trusted certificate
+  name: opnsense                      # label used in the dashboard
+  log_limit: 500                      # firewall log lines fetched per poll
+
+proxmox:
+  url: https://192.168.1.11:8006      # any node; the API covers the whole cluster
+  # token_id: infradash@pve!dash
+  # token_secret: 00000000-0000-0000-0000-000000000000
+  verify_tls: false
+  guest_agent: true                   # ask QEMU guest agents for IPs (ARP fills in otherwise)
+  config_refresh_s: 300               # how often guest NIC configs are re-read
+
+refresh: 5s
+
+# Actions (x key). Off by default: the dashboard is read-only until you enable this AND give
+# the credentials write privileges. Every action needs an explicit confirmation; hard power-off
+# and blocking one of your own hosts need the name typed in. All actions are logged.
+actions:
+  enabled: false
+  block_alias: infradash_block        # an OPNsense Host(s) alias that a block rule references
+  log_file: ~/.local/state/infradash/actions.log
