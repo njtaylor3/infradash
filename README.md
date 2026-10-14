@@ -86,7 +86,9 @@ built to keep working through it:
   encoding (`malformed chunk footer`). Responses are requested uncompressed, the firewall log
   is fetched incrementally (only lines newer than the last one seen), and a GET whose response
   is still malformed after a retry is re-read over HTTP/1.0, which has no chunked encoding;
-  that path then stays on HTTP/1.0. Setting `http2: true` is another way around it.
+  that path then stays on HTTP/1.0. A body that still isn't valid JSON is fetched once more,
+  and if that fails too the error gives its size and last bytes, which tell a cut-off body
+  from one with something else mixed in. Setting `http2: true` is another way around it.
 
 ## Keys
 

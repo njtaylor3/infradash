@@ -19,6 +19,7 @@ What it does about flaky connections:
 from __future__ import annotations
 
 import asyncio
+import re
 import ssl
 import time
 from collections.abc import Iterable
@@ -46,6 +47,10 @@ class ApiError(RuntimeError):
     @property
     def denied(self) -> bool:
         return self.status in (401, 403)
+
+
+class BadJson(ApiError):
+    """The server answered, but the body isn't valid JSON."""
 
 
 def _describe(e: Exception) -> str:
@@ -166,7 +171,11 @@ class ApiClient:
             r = await self.request("GET", path, params=params)
             if r.status_code == 404 and path != paths[-1]:
                 continue
-            return self._decode(path, r)
+            try:
+                return self._decode(path, r)
+            except BadJson:
+                # Usually a body that got cut off or mangled in transit: ask once more.
+                return self._decode(path, await self.request("GET", path, params=params))
         raise AssertionError("unreachable")
 
     async def post_json(self, *paths: str, json: dict | None = None, data: dict | None = None):
@@ -189,8 +198,9 @@ class ApiClient:
         try:
             return r.json()
         except ValueError as e:
-            raise ApiError(path, f"invalid JSON in response ({len(r.content)} bytes): {e}",
-                           r.status_code) from e
+            # The size and the last few bytes tell a cut-off body from one with junk in it.
+            raise BadJson(path, f"invalid JSON in response ({len(r.content)} bytes, "
+                                f"ends {r.content[-40:]!r}): {e}", r.status_code) from e
 
     # --- HTTP/1.0 fallback --------------------------------------------------------
     def _ssl_context(self) -> ssl.SSLContext:
@@ -224,22 +234,59 @@ class ApiClient:
                      "Connection: close", *(f"{k}: {v}" for k, v in self.headers.items())]
             writer.write(("\r\n".join(lines) + "\r\n\r\n").encode("latin-1"))
             await writer.drain()
-            raw = await asyncio.wait_for(reader.read(MAX_BODY), self.timeout.read)
+            status, headers, body = await self._read_http10(reader, request)
         except TimeoutError as e:
             raise httpx.ReadTimeout(str(e) or "read timed out", request=request) from e
         except OSError as e:
-            raise httpx.ReadError(str(e), request=request) from e
+            raise httpx.ReadError(str(e) or type(e).__name__, request=request) from e
         finally:
             writer.close()
-        head, sep, body = raw.partition(b"\r\n\r\n")
-        status_line, *header_lines = head.decode("latin-1").split("\r\n")
+        return httpx.Response(status, headers=headers, content=body, request=request)
+
+    async def _read_http10(self, reader: asyncio.StreamReader,
+                           request: httpx.Request) -> tuple[int, list[tuple[str, str]], bytes]:
+        """Read a whole response: up to Content-Length if the server sent one, else to the end
+        of the connection. (StreamReader.read(n) returns as soon as *some* data is in, so one
+        read gets only the first network segment of a large body.)"""
+        buf = bytearray()
+        head_end, expected = -1, None
+
+        def complete() -> bool:
+            return expected is not None and len(buf) - head_end >= expected
+
+        while not complete():           # with a Content-Length, don't wait for the close
+            try:
+                chunk = await asyncio.wait_for(reader.read(65536), self.timeout.read)
+            except OSError:
+                if complete():
+                    break
+                raise
+            if not chunk:
+                break
+            buf += chunk
+            if len(buf) > MAX_BODY:
+                raise httpx.RemoteProtocolError(f"response larger than {MAX_BODY} bytes", request=request)
+            if head_end < 0 and (i := buf.find(b"\r\n\r\n")) >= 0:
+                head_end = i + 4
+                cl = re.search(rb"(?im)^content-length:[ \t]*(\d+)[ \t]*\r?$", bytes(buf[:head_end]))
+                expected = int(cl.group(1)) if cl else None
+        if head_end < 0:
+            raise httpx.RemoteProtocolError(f"incomplete response header ({len(buf)} bytes)", request=request)
+        status_line, *header_lines = bytes(buf[:head_end - 4]).decode("latin-1").split("\r\n")
+        body = bytes(buf[head_end:])
         parts = status_line.split(" ", 2)
-        if not sep or len(parts) < 2 or not parts[0].startswith("HTTP/") or not parts[1].isdigit():
+        if len(parts) < 2 or not parts[0].startswith("HTTP/") or not parts[1].isdigit():
             raise httpx.RemoteProtocolError(f"not an HTTP response: {status_line[:60]!r}", request=request)
-        headers = [tuple(h.split(":", 1)) for h in header_lines if ":" in h]
-        headers = [(k.strip(), v.strip()) for k, v in headers
-                   if k.strip().lower() not in ("transfer-encoding", "content-encoding", "content-length")]
-        return httpx.Response(int(parts[1]), headers=headers, content=body, request=request)
+        headers = [(k.strip(), v.strip()) for k, sep, v in (h.partition(":") for h in header_lines) if sep]
+        if any(k.lower() == "transfer-encoding" and "chunked" in v.lower() for k, v in headers):
+            raise httpx.RemoteProtocolError("chunked reply to an HTTP/1.0 request", request=request)
+        if expected is not None:
+            if len(body) < expected:
+                raise httpx.ReadError(f"connection ended after {len(body)} of {expected} body bytes",
+                                      request=request)
+            body = body[:expected]
+        headers = [(k, v) for k, v in headers if k.lower() not in ("content-encoding", "content-length")]
+        return int(parts[1]), headers, body
 
     async def close(self) -> None:
         for c in self._clients.values():

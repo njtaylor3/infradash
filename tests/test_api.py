@@ -199,3 +199,79 @@ def test_http_errors_are_api_errors():
     assert denied.denied and "check privileges" in str(denied)
     assert "invalid JSON" in str(bad) and isinstance(bad, RuntimeError)
     assert fallback == renamed == {"v": 2}
+
+
+BIG = json.dumps({"rows": [{"n": i, "label": "x" * 40} for i in range(4000)]}).encode()
+
+
+def http10_in_pieces(body, *, declared=None, cut=None):
+    """HTTP/1.1 requests get a malformed chunked reply; HTTP/1.0 ones get `body` written in
+    small pieces with pauses, as a large response arrives over a real network. `declared` sets
+    a Content-Length; `cut` drops the connection after that many body bytes."""
+    async def behaviour(srv, line, writer):
+        if not line.endswith("HTTP/1.0"):
+            writer.write(malformed_chunked(body))
+            await writer.drain()
+            return False
+        head = "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n"
+        if declared is not None:
+            head += f"Content-Length: {declared}\r\n"
+        writer.write((head + "\r\n").encode())
+        data = body[:cut] if cut is not None else body
+        for i in range(0, len(data), 8192):
+            writer.write(data[i:i + 8192])
+            await writer.drain()
+            await asyncio.sleep(0.002)
+        return False
+    return behaviour
+
+
+def test_http10_body_is_read_to_the_end():
+    async def main():
+        async with Server(http10_in_pieces(BIG)) as srv:
+            api = ApiClient("opnsense", [srv.url])
+            try:
+                return [await api.get_json("/log") for _ in range(3)]
+            finally:
+                await api.close()
+
+    assert all(r == json.loads(BIG) for r in asyncio.run(main()))
+
+
+def test_http10_body_cut_short_is_a_transport_error_not_bad_json():
+    async def main():
+        async with Server(http10_in_pieces(BIG, declared=len(BIG), cut=len(BIG) // 2)) as srv:
+            api = ApiClient("opnsense", [srv.url])
+            try:
+                with pytest.raises(ApiError) as err:
+                    await api.get_json("/log")
+            finally:
+                await api.close()
+            return err.value
+
+    err = asyncio.run(main())
+    assert err.transport and "invalid JSON" not in str(err) and "ended after" in str(err)
+
+
+def test_invalid_json_is_retried_once():
+    async def behaviour(srv, line, writer):
+        n = len(srv.requests)
+        writer.write(ok(BODY[: len(BODY) // 2] if n == 1 or line.startswith("GET /always") else BODY))
+        await writer.drain()
+        return True
+
+    async def main():
+        async with Server(behaviour) as srv:
+            api = ApiClient("opnsense", [srv.url])
+            try:
+                good = await api.get_json("/log")
+                with pytest.raises(ApiError) as err:
+                    await api.get_json("/always-bad")
+            finally:
+                await api.close()
+            return srv, good, err.value
+
+    srv, good, err = asyncio.run(main())
+    assert good == json.loads(BODY)
+    assert sum(r.startswith("GET /always-bad") for r in srv.requests) == 2
+    assert "invalid JSON" in str(err) and f"{len(BODY) // 2} bytes" in str(err) and "ends b'" in str(err)
