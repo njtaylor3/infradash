@@ -9,7 +9,7 @@ from .correlate import Snapshot, build_snapshot
 from .health import find_issues
 from .models import Action, Event, MetricPanel
 
-HISTORY = 90
+HISTORY = 400   # samples; wide braille graphs show two per column
 
 
 class _Dedup:
@@ -34,7 +34,8 @@ class Collector:
     def __init__(self, provider) -> None:
         self.provider = provider
         self.name = provider.name
-        self.hist: dict[str, dict[str, deque]] = {k: {} for k in ("cpu", "mem", "net", "gw", "st")}
+        self.hist: dict[str, dict[str, deque]] = {
+            k: {} for k in ("cpu", "mem", "net", "gw", "st", "rx", "tx", "agg", "gmem")}
         self.issue_since: dict[str, float] = {}
         self.action_events: list[Event] = []
         self.action_log = getattr(provider, "action_log", None)
@@ -57,18 +58,25 @@ class Collector:
             self._push("mem", n.name, n.mem if n.online else 0.0)
         for i in raw.ifaces:
             self._push("net", i.name, (i.rx_bps + i.tx_bps) / 1e6)
+            self._push("rx", i.key, i.rx_bps)
+            self._push("tx", i.key, i.tx_bps)
+        online = [n for n in raw.nodes if n.online]
+        if online:
+            self._push("agg", "cpu", sum(n.cpu for n in online) / len(online))
+            self._push("agg", "mem", sum(n.mem for n in online) / len(online))
         for g in raw.gateways:
             self._push("gw", g.name, g.rtt_ms if g.rtt_ms is not None else 0.0)
         for st in sorted(raw.storages, key=lambda x: x.label):
             self._push("st", st.label, st.pct)
         for g in raw.guests:
-            self.guest_cpu.setdefault(g.id, deque(maxlen=40)).append(
+            self.guest_cpu.setdefault(g.id, deque(maxlen=HISTORY)).append(
                 g.cpu if g.status == "running" else 0.0)
+            self._push("gmem", g.id, g.mem if g.status == "running" else 0.0)
         self.fw.extend(raw.fw_log)
         self.pve.extend(raw.pve_log)
 
         def series(k):
-            return {row: list(vals) for row, vals in self.hist[k].items()}
+            return {row: list(vals)[-90:] for row, vals in self.hist[k].items()}
         metrics = [
             MetricPanel("CPU", "%", series("cpu"), warn=75, crit=90),
             MetricPanel("Memory", "%", series("mem"), warn=80, crit=92),
@@ -79,7 +87,7 @@ class Collector:
                         warn=80, crit=90),
         ]
         snap = build_snapshot(raw, list(self.fw.items), list(self.pve.items), metrics,
-                              {k: list(v) for k, v in self.guest_cpu.items()}, self.action_events)
+                              {k: list(v)[-90:] for k, v in self.guest_cpu.items()}, self.action_events)
         now = time.time()
         issues = find_issues(snap, {k: list(v) for k, v in self.hist["cpu"].items()})
         live = {i.key for i in issues}
@@ -124,3 +132,9 @@ class Collector:
 
     async def close(self) -> None:
         await self.provider.close()
+
+    def series(self, panel: str, row: str) -> list[float]:
+        """Full-length history for one row, for the btop-style graphs."""
+        if panel == "gcpu":
+            return list(self.guest_cpu.get(row, []))
+        return list(self.hist.get(panel, {}).get(row, []))
