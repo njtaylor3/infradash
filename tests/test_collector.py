@@ -98,3 +98,18 @@ def test_demo_polls_cleanly():
 
     snaps = asyncio.run(main())
     assert all(s.raw.guests and s.raw.ifaces and s.events for s in snaps)
+
+
+def test_full_history_for_graphs_but_90_samples_in_the_snapshot():
+    async def main():
+        col = Collector(DemoProvider())
+        for _ in range(95):
+            snap = await col.poll()
+        await col.close()
+        return col, snap
+
+    col, snap = asyncio.run(main())
+    gid = next(g.id for g in snap.raw.guests if g.status == "running")
+    assert len(col.series("gcpu", gid)) == 95 and len(snap.guest_cpu[gid]) == 90
+    assert len(col.series("agg", "cpu")) == 95
+    assert all(len(v) <= 90 for v in snap.metrics[0].series.values())

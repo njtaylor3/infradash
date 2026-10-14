@@ -104,7 +104,7 @@ class InfraDash(App):
         except Exception as e:  # noqa: BLE001
             self.notify(f"poll failed: {e}", severity="error", timeout=8)
             return
-        for err in self.snap.raw.errors[:3]:
+        for err in self.snap.raw.new_errors[:3]:
             self.notify(err, severity="warning", timeout=6)
         self.render_all()
 

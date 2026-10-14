@@ -13,14 +13,40 @@ pip install -r requirements.txt
 
 python -m infradash --demo            # simulated homelab, no hardware needed
 python -m infradash -c config.yaml    # your firewall and cluster
+python -m infradash --demo --classic  # the original panel layout
 ```
+
+## The btop-style interface (default)
+
+Modelled on [btop](https://github.com/aristocratos/btop): its box layout, square boxes with
+titles set into the border, red hotkeys you can also click, braille graphs drawn with
+btop's own symbol tables and algorithm, `■` gradient meters, and its Default theme colours.
+
+| Box | Like btop's | Shows |
+|---|---|---|
+| ¹cluster | cpu box | Cluster CPU graph with memory mirrored below it, an attention list, and a per-node panel with CPU mini-graphs, memory meters, gateway and firewall states. Clock and update interval in the top border. |
+| ²mem | mem box | Memory per node and firewall on the left; on the right ("disks"), ZFS pool health, Ceph health and every storage with a usage meter |
+| ³net | net box | Auto-scaling download graph with upload mirrored below for one firewall interface (`b`/`n` to switch), plus current/peak rates, gateway latency and recent blocks |
+| ⁴guests | proc box | VMs and containers like btop's process list: sortable columns, per-guest CPU mini-graphs, filter, and Enter for a detail view with a large CPU graph. `e` switches to the cluster tree or the network tree. |
+| ⁵events | (new) | Firewall log, Proxmox log, tasks and your own actions; Enter jumps to what an event is about |
+
+Keys follow btop where an equivalent exists: `1`–`5` show or hide boxes, `+`/`-` change the
+update interval, `←`/`→` change the sort, `r` reverses, `f` filters, `e` toggles the tree
+view, Enter opens details and Esc closes them. `tab` switches between the guest list and
+the event list, `x` opens actions, `a` jumps to the next item needing attention, `l` and
+`s` filter events by level and source, and `h` or `?` shows all keys. The mouse works too:
+click a row to select it, double-click for details, scroll lists with the wheel, and
+click any red hotkey in a border.
+
+As with btop, use a terminal with 24-bit colour and a font that includes the Unicode
+Braille Patterns block; otherwise the graphs show as boxes or misaligned dots.
 
 The demo has a firewall with WAN, LAN and three VLANs and a three-node cluster with ten
 guests. Every few minutes a backup loads two nodes (one run in three fails), a VM
 live-migrates between nodes, SSH brute-force bursts hit WAN, an IoT camera keeps trying SMB
 into the server VLAN, and the ISP gateway degrades.
 
-## What's on screen
+## What's on screen (both interfaces)
 
 **Metrics:** CPU and memory for the firewall and each node, traffic per firewall interface,
 gateway latency, and how full each storage is.
@@ -174,6 +200,8 @@ a notification names the endpoint that returned 401/403, and that panel stays em
 - `infradash/collector.py` — metric history and log de-duplication across polls
 - `infradash/views.py` — topology trees and the inspector
 - `infradash/demo.py` — the simulated homelab
-- `infradash/app.py` — the Textual UI
+- `infradash/btop/` — the btop-style interface: `draw.py` (boxes, braille graphs, meters, ported
+  from btop's `btop_draw.cpp`), `theme.py` (btop's Default theme), `boxes.py`, `app.py`
+- `infradash/app.py` — the classic interface (`--classic`)
 - `tests/` — `pip install pytest && python -m pytest`; includes real-socket tests for the
   malformed-response and dropped-connection cases
