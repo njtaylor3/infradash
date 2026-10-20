@@ -80,6 +80,7 @@ class Iface:
     up: bool = True
     rx_bps: float = 0.0
     tx_bps: float = 0.0
+    mac: str = ""       # upper-case; lets the firewall be matched to its own VM
 
     @property
     def id(self) -> str:
@@ -182,7 +183,32 @@ class Raw:
     zpools: list["ZPool"] = field(default_factory=list)
     ceph: "Ceph | None" = None
     replication: list["Replication"] = field(default_factory=list)
+    ha: "HaStatus | None" = None
     errors: list[str] = field(default_factory=list)
+    new_errors: list[str] = field(default_factory=list)   # errors the previous poll didn't have
+    sources: dict[str, "SourceStatus"] = field(default_factory=dict)   # "opnsense" / "proxmox"
+
+    def merge(self, other: "Raw") -> None:
+        """Fold another system's poll into this one (each system fills its own fields)."""
+        for name, default in vars(Raw()).items():
+            if name in ("errors", "new_errors", "sources"):
+                continue
+            value = getattr(other, name)
+            if value != default:
+                setattr(self, name, value)
+        self.errors.extend(other.errors)
+        self.sources.update(other.sources)
+
+
+@dataclass
+class SourceStatus:
+    """How the connection to one API is doing."""
+    name: str                       # opnsense | proxmox
+    endpoint: str = ""              # base URL in use (after any failover)
+    ok: bool = True                 # the last poll reached the API
+    last_ok: float | None = None    # when it last did
+    error: str = ""
+    stale: bool = False             # this poll shows cached data because the API didn't answer
 
 
 # --- storage ------------------------------------------------------------------
@@ -252,6 +278,27 @@ class Replication:
     last_sync: float | None
     fail_count: int = 0
     error: str = ""
+
+
+@dataclass
+class HaService:
+    sid: str                # vm:100 | ct:201
+    node: str
+    state: str              # started | stopped | error | fence | recovery | freeze | migrate ...
+    request: str = ""       # requested state
+
+    @property
+    def vmid(self) -> int | None:
+        tail = self.sid.rpartition(":")[2]
+        return int(tail) if tail.isdigit() else None
+
+
+@dataclass
+class HaStatus:
+    master: str | None = None           # node running the CRM master
+    master_state: str = ""              # active | old timestamp - dead? | ...
+    lrm: dict[str, str] = field(default_factory=dict)    # node -> active | idle | maintenance mode ...
+    services: list[HaService] = field(default_factory=list)
 
 
 # --- derived objects ----------------------------------------------------------

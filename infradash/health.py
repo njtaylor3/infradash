@@ -23,6 +23,25 @@ def find_issues(snap: Snapshot, cpu_hist: dict[str, list[float]]) -> list[Issue]
     def add(sev, entity, title, detail="", key=None):
         out.append(Issue(sev, entity, title, detail, key or f"{entity}:{title}"))
 
+    now = time.time()
+
+    # Can we see the systems at all?
+    for st in raw.sources.values():
+        if st.ok:
+            continue
+        what, ent = ("Proxmox API", "cluster") if st.name == "proxmox" else ("Firewall API", "fw")
+        detail = st.error
+        if st.last_ok:
+            ago = fmt_uptime(now - st.last_ok)
+            detail += f" — showing data from {ago} ago" if st.stale else f" — last answered {ago} ago"
+        if st.name == "opnsense" and snap.fw_guest and (g := snap.guest(snap.fw_guest)):
+            # The firewall is a VM on the cluster, so Proxmox can often say why it's gone.
+            if g.status != "running":
+                ent, detail = g.id, f"Its VM {g.label} is {g.status} on {g.node}. {detail}"
+            else:
+                detail += f" (its VM {g.label} is running on {g.node})"
+        add("warn" if st.stale else "crit", ent, f"{what} unreachable", detail, key=f"source:{st.name}")
+
     # Cluster and nodes
     if raw.quorate is False:
         add("crit", "cluster", "Cluster has lost quorum",
@@ -79,7 +98,6 @@ def find_issues(snap: Snapshot, cpu_hist: dict[str, list[float]]) -> list[Issue]
         if c.pct >= 75:
             add("crit" if c.pct >= 85 else "warn", "ceph", f"Ceph {c.pct:.0f}% used",
                 "Ceph stops writes when an OSD reaches its full ratio.", key="ceph:full")
-    now = time.time()
     for r in raw.replication:
         gid = f"guest:{r.vmid}"
         if r.fail_count:
@@ -89,6 +107,40 @@ def find_issues(snap: Snapshot, cpu_hist: dict[str, list[float]]) -> list[Issue]
         elif r.last_sync and now - r.last_sync > 6 * 3600:
             add("warn", gid, f"Replication {r.job} ({snap.name(gid)}) stale",
                 f"last sync {fmt_uptime(now - r.last_sync)} ago", key=f"repl:{r.job}")
+
+    # High availability
+    if raw.ha and raw.ha.services:
+        ha = raw.ha
+        fenced: set[str] = set()
+        for svc in ha.services:
+            gid = f"guest:{svc.vmid}"
+            if gid not in snap.names:
+                gid = f"node:{svc.node}"
+            who = snap.name(gid) if gid.startswith("guest:") else svc.sid
+            if svc.state == "error":
+                add("crit", gid, f"HA resource {who} is in error state",
+                    f"HA gave up on {svc.sid}. Fix the cause, then `ha-manager set {svc.sid} --state "
+                    "disabled` and start it again.", key=f"ha:{svc.sid}")
+            elif svc.state == "fence" and svc.node not in fenced:
+                fenced.add(svc.node)
+                add("crit", f"node:{svc.node}", f"HA is fencing {svc.node}",
+                    "Its HA guests are recovered on other nodes once the fence completes.",
+                    key=f"ha:fence:{svc.node}")
+            elif svc.state == "recovery":
+                add("crit", gid, f"HA is recovering {who}",
+                    f"Its node {svc.node} failed; waiting for a node that can take it.", key=f"ha:{svc.sid}")
+            elif svc.state == "freeze":
+                add("warn", gid, f"HA resource {who} is frozen",
+                    f"{svc.node} is shutting down or restarting; HA won't move it meanwhile.",
+                    key=f"ha:{svc.sid}")
+        if not ha.master or "dead" in ha.master_state:
+            add("warn", "cluster", "HA manager has no active master",
+                "HA resources won't be recovered or moved until one is elected.", key="ha:master")
+        online = {n.name for n in raw.nodes if n.online}
+        for node, mode in ha.lrm.items():
+            if "dead" in mode and node in online:
+                add("warn", f"node:{node}", f"HA agent on {node} isn't reporting",
+                    "Its pve-ha-lrm service may be stuck; HA can't act on its guests.", key=f"ha:lrm:{node}")
 
     # Firewall and network
     if raw.fw and raw.fw.states and raw.fw.states_limit:

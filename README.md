@@ -13,14 +13,40 @@ pip install -r requirements.txt
 
 python -m infradash --demo            # simulated homelab, no hardware needed
 python -m infradash -c config.yaml    # your firewall and cluster
+python -m infradash --demo --classic  # the original panel layout
 ```
+
+## The btop-style interface (default)
+
+Modelled on [btop](https://github.com/aristocratos/btop): its box layout, square boxes with
+titles set into the border, red hotkeys you can also click, braille graphs drawn with
+btop's own symbol tables and algorithm, `■` gradient meters, and its Default theme colours.
+
+| Box | Like btop's | Shows |
+|---|---|---|
+| ¹cluster | cpu box | Cluster CPU graph with memory mirrored below it, an attention list, and a per-node panel with CPU mini-graphs, memory meters, gateway and firewall states. Clock and update interval in the top border. |
+| ²mem | mem box | Memory per node and firewall on the left; on the right ("disks"), ZFS pool health, Ceph health and every storage with a usage meter |
+| ³net | net box | Auto-scaling download graph with upload mirrored below for one firewall interface (`b`/`n` to switch), plus current/peak rates, gateway latency and recent blocks |
+| ⁴guests | proc box | VMs and containers like btop's process list: sortable columns, per-guest CPU mini-graphs, filter, and Enter for a detail view with a large CPU graph. `e` switches to the cluster tree or the network tree. |
+| ⁵events | (new) | Firewall log, Proxmox log, tasks and your own actions; Enter jumps to what an event is about |
+
+Keys follow btop where an equivalent exists: `1`–`5` show or hide boxes, `+`/`-` change the
+update interval, `←`/`→` change the sort, `r` reverses, `f` filters, `e` toggles the tree
+view, Enter opens details and Esc closes them. `tab` switches between the guest list and
+the event list, `x` opens actions, `a` jumps to the next item needing attention, `l` and
+`s` filter events by level and source, and `h` or `?` shows all keys. The mouse works too:
+click a row to select it, double-click for details, scroll lists with the wheel, and
+click any red hotkey in a border.
+
+As with btop, use a terminal with 24-bit colour and a font that includes the Unicode
+Braille Patterns block; otherwise the graphs show as boxes or misaligned dots.
 
 The demo has a firewall with WAN, LAN and three VLANs and a three-node cluster with ten
 guests. Every few minutes a backup loads two nodes (one run in three fails), a VM
 live-migrates between nodes, SSH brute-force bursts hit WAN, an IoT camera keeps trying SMB
 into the server VLAN, and the ISP gateway degrades.
 
-## What's on screen
+## What's on screen (both interfaces)
 
 **Metrics:** CPU and memory for the firewall and each node, traffic per firewall interface,
 gateway latency, and how full each storage is.
@@ -32,7 +58,9 @@ on CPU or memory, storage over 80/90%, ZFS pools that aren't ONLINE or are over 
 or heavily fragmented, Ceph health warnings, down OSDs and Ceph usage, failing or stale ZFS
 replication, a firewall state table filling up, interfaces or gateways down, gateway packet
 loss or latency, a single source being blocked over and over (a scan or brute force), and
-tasks that failed in the last day.
+tasks that failed in the last day, an API that stopped answering (naming the firewall's VM
+when the firewall is virtualized and that VM is down), and HA trouble: a resource in error, a
+node being fenced, a guest being recovered or frozen, no active HA master, or a silent HA agent.
 
 **Topology map** (`v` toggles between two views of the same relationships):
 the network view is firewall → interfaces/VLANs → gateways, nodes, guests and other hosts
@@ -62,6 +90,31 @@ replaced by guest and host names.
 
 Guests that are stopped, or that the firewall can't see (e.g. on a bridge it isn't part of),
 appear in a separate "not seen by the firewall" group rather than being guessed.
+
+## Staying connected
+
+The dashboard is meant to be most useful when something is broken, so the API clients are
+built to keep working through it:
+
+- **Proxmox failover.** `url` can be a list, and with `discover_nodes: true` (the default) the
+  other cluster nodes are added as fallbacks: by their address on the same subnet as the
+  configured URL (so a dedicated Corosync network you can't reach is never used), or by
+  swapping node names into the hostname (`tower-1.home.arpa` → `tower-2.home.arpa`). If the
+  node you talk to goes down, the next poll uses another one.
+- **Nothing slow holds a poll up.** Guest configs, guest agents, ZFS, replication, Ceph and HA
+  are refreshed in the background; a poll waits for them at most `slow_call_budget_s` and
+  otherwise shows what it already has. A guest agent that hangs no longer stalls the dashboard.
+- **Short outages show the last data**, marked stale and counted in the attention list, for up
+  to `stale_max_s`, instead of an empty screen. One system failing never blanks the other.
+- **Flaky connections are retried.** Idle connections are dropped before pveproxy drops them,
+  and a GET that loses its connection is retried once on a fresh one.
+- **Malformed responses are recovered.** Some OPNsense responses arrive with broken chunked
+  encoding (`malformed chunk footer`). Responses are requested uncompressed, the firewall log
+  is fetched incrementally (only lines newer than the last one seen), and a GET whose response
+  is still malformed after a retry is re-read over HTTP/1.0, which has no chunked encoding;
+  that path then stays on HTTP/1.0. A body that still isn't valid JSON is fetched once more,
+  and if that fails too the error gives its size and last bytes, which tell a cut-off body
+  from one with something else mixed in. Setting `http2: true` is another way around it.
 
 ## Keys
 
@@ -103,7 +156,7 @@ Adding to the alias doesn't close existing connections; kill the address's state
 ## Credentials (read-only)
 
 **Proxmox** — an API token with the built-in `PVEAuditor` role is enough for everything
-except guest-agent IP lookups:
+(including HA status and finding the other nodes' addresses) except guest-agent IP lookups:
 
 ```bash
 pveum user add infradash@pve
@@ -138,6 +191,8 @@ a notification names the endpoint that returned 401/403, and that panel stays em
 
 ## Code layout
 
+- `infradash/api.py` — HTTP shared by both clients: retries, failover, the HTTP/1.0 fallback, typed errors
+- `infradash/cache.py` — background refresh with a time budget, counter rates, last-good values
 - `infradash/opnsense.py`, `infradash/proxmox.py` — API clients and response parsers
 - `infradash/correlate.py` — the join: IP/MAC ownership, network placement, event entities
 - `infradash/health.py` — the attention rules
@@ -145,4 +200,8 @@ a notification names the endpoint that returned 401/403, and that panel stays em
 - `infradash/collector.py` — metric history and log de-duplication across polls
 - `infradash/views.py` — topology trees and the inspector
 - `infradash/demo.py` — the simulated homelab
-- `infradash/app.py` — the Textual UI
+- `infradash/btop/` — the btop-style interface: `draw.py` (boxes, braille graphs, meters, ported
+  from btop's `btop_draw.cpp`), `theme.py` (btop's Default theme), `boxes.py`, `app.py`
+- `infradash/app.py` — the classic interface (`--classic`)
+- `tests/` — `pip install pytest && python -m pytest`; includes real-socket tests for the
+  malformed-response and dropped-connection cases

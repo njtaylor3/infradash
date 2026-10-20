@@ -21,9 +21,9 @@ def main() -> None:
     mode.add_argument("--demo", action="store_true", help="run against a simulated homelab")
     mode.add_argument("-c", "--config", help="YAML config with opnsense: and/or proxmox: sections")
     ap.add_argument("--refresh", type=float, help="seconds between polls")
+    ap.add_argument("--classic", action="store_true", help="use the original (non-btop) layout")
     args = ap.parse_args()
 
-    from .app import InfraDash
     from .collector import Collector
 
     if args.demo:
@@ -40,7 +40,12 @@ def main() -> None:
             refresh = args.refresh or _seconds(cfg.get("refresh", "5s"))
         except (KeyError, ValueError) as e:
             sys.exit(f"config error: {e}")
-    InfraDash(Collector(provider), refresh).run()
+    if args.classic:
+        from .app import InfraDash
+        InfraDash(Collector(provider), refresh).run()
+    else:
+        from .btop.app import BtopApp
+        BtopApp(Collector(provider), refresh).run()
 
 
 if __name__ == "__main__":
