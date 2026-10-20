@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from rich.text import Text
 from textual.widget import Widget
 
-from .btop.theme import row_colors, st
+from .btop.theme import row_colors, st as sty
 from .models import MetricPanel
 
 SPARK = "▁▂▃▄▅▆▇█"
@@ -19,10 +19,10 @@ class _Roles(dict):
         super().__init__(roles)
 
     def get(self, key, default=None):
-        return st(dict.get(self, key)) if key in self else default
+        return sty(dict.get(self, key)) if key in self else default
 
     def __getitem__(self, key):
-        return st(dict.__getitem__(self, key))
+        return sty(dict.__getitem__(self, key))
 
 
 LEVEL_STYLE = _Roles({"ERROR": "crit", "WARN": "warn", "INFO": "ok", "DEBUG": "dim"})
@@ -35,8 +35,8 @@ def level_text(level: str) -> Text:
 
 def pct_style(v: float | None, warn: float = 75, crit: float = 90) -> str:
     if v is None:
-        return st("dim")
-    return st("crit") if v >= crit else (st("warn") if v >= warn else st("ok"))
+        return sty("dim")
+    return sty("crit") if v >= crit else (sty("warn") if v >= warn else sty("ok"))
 
 
 def fmt_value(v: float, unit: str) -> str:
@@ -74,7 +74,7 @@ class MetricPanelView(Widget):
 
     def render(self) -> Text:
         if not self.panel or not self.panel.series:
-            return Text("no data", style=st("dim"))
+            return Text("no data", style=sty("dim"))
         rows = list(self.panel.series.items())[: self.MAX_ROWS]
         width = max(20, self.content_size.width)
         name_w = min(14, max(len(n) for n, _ in rows))
@@ -96,9 +96,9 @@ class MetricPanelView(Widget):
             latest = pts[-1] if pts else 0.0
             vstyle = ""
             if self.panel.crit is not None and latest >= self.panel.crit:
-                vstyle = st("crit")
+                vstyle = sty("crit")
             elif self.panel.warn is not None and latest >= self.panel.warn:
-                vstyle = st("warn")
+                vstyle = sty("warn")
             out.append(fmt_value(latest, self.panel.unit).rjust(val_w), style=vstyle)
         return out
 
@@ -114,15 +114,15 @@ def render_tree(roots: list[TNode], selected: str | None, path: set[str], legend
     out = Text()
 
     def walk(node: TNode, prefix: str, last: bool, parent: TNode | None) -> None:
-        line = Text(prefix, style=st("dim"))
+        line = Text(prefix, style=sty("dim"))
         if parent is not None:
             on_path = node.eid in path and parent.eid in path
-            line.append("└─ " if last else "├─ ", style=st("path") if on_path else st("dim"))
+            line.append("└─ " if last else "├─ ", style=sty("path") if on_path else sty("dim"))
         label = node.label.copy()
         if node.eid and node.eid == selected:
             label.stylize("reverse")
         elif node.eid in path:
-            label.stylize(st("strong"))
+            label.stylize(sty("strong"))
         line.append_text(label)
         out.append_text(line)
         out.append("\n")
