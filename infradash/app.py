@@ -12,6 +12,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import DataTable, Footer, Header, Static
 
 from .actions import available_actions
+from .btop.theme import st as sty, textual_theme
 from .collector import Collector
 from .dialogs import ActionMenu, ConfirmAction
 from .correlate import Snapshot
@@ -81,6 +82,10 @@ class InfraDash(App):
         yield Footer()
 
     def on_mount(self) -> None:
+        theme = textual_theme()
+        if theme is not None:
+            self.register_theme(theme)
+            self.theme = theme.name
         self.query_one("#guests", DataTable).add_columns(
             " ", "id", "name", "node", "cpu", "trend", "mem", "net ↓/↑", "network")
         self.query_one("#events", DataTable).add_columns("time", "src", "level", "about", "event")
@@ -155,7 +160,7 @@ class InfraDash(App):
             roots = cluster_tree(snap) or network_tree(snap)
         self.query_one("#map", Static).update(
             render_tree(roots, self.selected, path, legend(self.view)) if roots
-            else Text("waiting for data…", style="dim"))
+            else Text("waiting for data…", style=sty("dim")))
         self.query_one("#mapbox").border_title = (
             "Network topology (firewall → networks → hosts) · v: cluster view" if self.view == "network"
             else "Cluster topology (cluster → nodes → guests → networks) · v: network view")
@@ -182,20 +187,20 @@ class InfraDash(App):
             guests = [g for g in guests if g in snap.guests_on(sel)]
         for g in guests:
             running = g.status == "running"
-            dim = "" if running else "dim"
+            dim = "" if running else sty("dim")
             nets = ", ".join(snap.name(f"if:{k}") for k in snap.placement.get(g.id, [])) or "?"
             table.add_row(
-                Text(GUEST_ICON.get(g.kind, "▪"), style="green" if running else "dim"),
+                Text(GUEST_ICON.get(g.kind, "▪"), style=sty("ok") if running else sty("dim")),
                 Text(str(g.vmid), style=dim),
                 Text(g.name, style=("bold " if g.id == sel else "") + dim),
-                Text(g.node, style="dim"),
-                Text(f"{g.cpu:.0f}%" if running else g.status, style=pct_style(g.cpu) if running else "dim",
+                Text(g.node, style=sty("dim")),
+                Text(f"{g.cpu:.0f}%" if running else g.status, style=pct_style(g.cpu) if running else sty("dim"),
                      justify="right"),
                 Text(sparkline(snap.guest_cpu.get(g.id, []), 12, 100.0) if running else "",
-                     style="deep_sky_blue1"),
+                     style=sty("node")),
                 Text(f"{g.mem:.0f}%" if running else "", style=pct_style(g.mem, 85, 95), justify="right"),
-                Text(f"{fmt_bps(g.net_in)} / {fmt_bps(g.net_out)}" if running else "", style="dim"),
-                Text(nets, style="cyan" if nets != "?" else "dim"),
+                Text(f"{fmt_bps(g.net_in)} / {fmt_bps(g.net_out)}" if running else "", style=sty("dim")),
+                Text(nets, style=sty("net") if nets != "?" else sty("dim")),
                 key=g.id,
             )
         scope = f" on {snap.name(sel)}" if sel.startswith(("node:", "if:", "st:")) else ""
@@ -224,11 +229,11 @@ class InfraDash(App):
                 e.entities[0] if e.entities else None)
             about = snap.name(primary)
             table.add_row(
-                Text(datetime.fromtimestamp(e.ts).strftime("%H:%M:%S"), style="dim"),
+                Text(datetime.fromtimestamp(e.ts).strftime("%H:%M:%S"), style=sty("dim")),
                 Text(e.source, style=SOURCE_STYLE.get(e.source, "")),
                 level_text(e.level),
-                Text(about[:16], style="bold" if primary and primary == self.selected else ""),
-                Text(e.message[:220], style="red" if e.level == "ERROR" else ""),
+                Text(about[:16], style=sty("strong") if primary and primary == self.selected else ""),
+                Text(e.message[:220], style=sty("bad") if e.level == "ERROR" else ""),
                 key=key,
             )
         scope = f" involving {snap.name(self.selected)}" if self.selected else ""

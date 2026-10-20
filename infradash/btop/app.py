@@ -18,7 +18,7 @@ from ..models import LEVEL_RANK, LEVELS, Action, Event, Task
 from ..views import cluster_tree, network_tree
 from .boxes import ClusterBox, EventsBox, GuestsBox, MemBox, NetBox, tree_rows
 from .draw import Canvas, box
-from .theme import c
+from .theme import c, textual_theme
 
 VIEWS = ["list", "cluster", "network"]
 SORTS = ["cpu", "mem", "name", "vmid", "node", "net"]
@@ -52,7 +52,7 @@ KEY_ACTIONS = {
 class HelpScreen(ModalScreen[None]):
     BINDINGS = [Binding("escape", "dismiss", show=False), Binding("q", "dismiss", show=False),
                 Binding("h", "dismiss", show=False)]
-    DEFAULT_CSS = "HelpScreen { align: center middle; } #help { width: 96; height: auto; background: #000000; }"
+    DEFAULT_CSS = "HelpScreen { align: center middle; } #help { width: 96; height: auto; background: %s; }" % c("main_bg")
 
     def compose(self) -> ComposeResult:
         w, h = 96, len(HELP) + 4
@@ -76,7 +76,7 @@ class MainScreen(Screen):
 class BtopApp(App):
     TITLE = "infradash"
     CSS = f"""
-    Screen {{ background: #000000; layout: vertical; }}
+    Screen {{ background: {c('main_bg')}; layout: vertical; }}
     #cluster {{ height: 30%; min-height: 9; }}
     #middle {{ height: 1fr; }}
     #left {{ width: 44%; }}
@@ -84,8 +84,8 @@ class BtopApp(App):
     #net {{ height: 9fr; }}
     #guests {{ width: 1fr; }}
     #events {{ height: 24%; min-height: 6; }}
-    #dialog {{ border: solid {c('proc_box')}; background: #000000; }}
-    OptionList {{ background: #000000; border: none; }}
+    #dialog {{ border: solid {c('proc_box')}; background: {c('main_bg')}; }}
+    OptionList {{ background: {c('main_bg')}; border: none; }}
     OptionList > .option-list--option-highlighted {{ background: {c('selected_bg')}; color: {c('selected_fg')}; }}
     """
     BINDINGS = [Binding(k, a, show=False, priority=True) for k, a in KEY_ACTIONS.items()
@@ -132,6 +132,10 @@ class BtopApp(App):
         yield EventsBox(id="events")
 
     def on_mount(self) -> None:
+        theme = textual_theme()
+        if theme is not None:
+            self.register_theme(theme)
+            self.theme = theme.name
         self._timer = self.set_interval(self.refresh_s, self._tick)
         self.set_interval(1.0, lambda: self._refresh_box("#cluster"))
         self.load()

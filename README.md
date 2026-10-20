@@ -14,13 +14,27 @@ pip install -r requirements.txt
 python -m infradash --demo            # simulated homelab, no hardware needed
 python -m infradash -c config.yaml    # your firewall and cluster
 python -m infradash --demo --classic  # the original panel layout
+python -m infradash --demo --theme btop  # btop's Default colours instead of Marathon
 ```
+
+## Theme
+
+infradash uses the **Marathon** palette by default — the same U.E.S.C. phosphor scheme as the
+NTH//07 Alacritty, Marathon Vim and marathon-shell configs: phosphor green (`#39ff5a`) on
+`#0a0f0a`, cyan-green accents and hotkeys, amber-green (`#b8ff70`) for warnings, and red
+(`#ff4444`) kept for errors and severity only. Both layouts, their dialogs, the inspector and
+the topology trees all follow it.
+
+`--theme btop` (or `theme: btop` in the config) switches back to btop's Default theme in the
+btop layout and the original colours in the classic one. Palettes live in
+`infradash/btop/theme.py`: `c()` for palette keys, `gradient()` for meters and graphs, and
+`st()` for the semantic styles (`ok`, `warn`, `crit`, `dim`, ...) the shared views use.
 
 ## The btop-style interface (default)
 
 Modelled on [btop](https://github.com/aristocratos/btop): its box layout, square boxes with
 titles set into the border, red hotkeys you can also click, braille graphs drawn with
-btop's own symbol tables and algorithm, `■` gradient meters, and its Default theme colours.
+btop's own symbol tables and algorithm, and `■` gradient meters.
 
 | Box | Like btop's | Shows |
 |---|---|---|
@@ -201,7 +215,7 @@ a notification names the endpoint that returned 401/403, and that panel stays em
 - `infradash/views.py` — topology trees and the inspector
 - `infradash/demo.py` — the simulated homelab
 - `infradash/btop/` — the btop-style interface: `draw.py` (boxes, braille graphs, meters, ported
-  from btop's `btop_draw.cpp`), `theme.py` (btop's Default theme), `boxes.py`, `app.py`
+  from btop's `btop_draw.cpp`), `theme.py` (Marathon and btop palettes), `boxes.py`, `app.py`
 - `infradash/app.py` — the classic interface (`--classic`)
 - `tests/` — `pip install pytest && python -m pytest`; includes real-socket tests for the
   malformed-response and dropped-connection cases
