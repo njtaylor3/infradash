@@ -58,7 +58,7 @@ class Canvas:
             st = styles[i]
             fg = st.color.get_truecolor().hex if st.color else None
             if st.dim and fg:
-                fg = "#606060"
+                fg = c("tree_fg")
             if st.reverse:
                 self.put(x + i, y, ch, c("selected_fg"), True, c("selected_bg"))
             else:

@@ -22,6 +22,7 @@ proxmox:
   config_refresh_s: 300               # how often guest NIC configs are re-read
 
 refresh: 5s
+theme: marathon                       # marathon (default) or btop; --theme overrides
 
 # Connection behaviour (both sections take these; the defaults suit a LAN):
 #   timeout: 10                # seconds to wait for an answer (connecting gives up after 3)

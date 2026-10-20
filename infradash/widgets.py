@@ -6,13 +6,27 @@ from dataclasses import dataclass, field
 from rich.text import Text
 from textual.widget import Widget
 
+from .btop.theme import row_colors, st
 from .models import MetricPanel
 
 SPARK = "▁▂▃▄▅▆▇█"
-ROW_COLORS = ["deep_sky_blue1", "medium_purple1", "turquoise2", "spring_green2", "sky_blue1",
-              "light_slate_blue", "aquamarine1", "steel_blue1", "medium_orchid", "dark_sea_green2"]
-LEVEL_STYLE = {"ERROR": "bold red", "WARN": "yellow", "INFO": "green", "DEBUG": "dim"}
-SOURCE_STYLE = {"fw": "orange1", "pve": "deep_sky_blue1", "task": "medium_purple1", "you": "bold magenta"}
+
+
+class _Roles(dict):
+    """Looks keys up through the active theme at call time, so the theme can be set late."""
+
+    def __init__(self, roles: dict[str, str]) -> None:
+        super().__init__(roles)
+
+    def get(self, key, default=None):
+        return st(dict.get(self, key)) if key in self else default
+
+    def __getitem__(self, key):
+        return st(dict.__getitem__(self, key))
+
+
+LEVEL_STYLE = _Roles({"ERROR": "crit", "WARN": "warn", "INFO": "ok", "DEBUG": "dim"})
+SOURCE_STYLE = _Roles({"fw": "src_fw", "pve": "src_pve", "task": "src_task", "you": "src_you"})
 
 
 def level_text(level: str) -> Text:
@@ -21,8 +35,8 @@ def level_text(level: str) -> Text:
 
 def pct_style(v: float | None, warn: float = 75, crit: float = 90) -> str:
     if v is None:
-        return "dim"
-    return "bold red" if v >= crit else ("yellow" if v >= warn else "green")
+        return st("dim")
+    return st("crit") if v >= crit else (st("warn") if v >= warn else st("ok"))
 
 
 def fmt_value(v: float, unit: str) -> str:
@@ -60,7 +74,7 @@ class MetricPanelView(Widget):
 
     def render(self) -> Text:
         if not self.panel or not self.panel.series:
-            return Text("no data", style="dim")
+            return Text("no data", style=st("dim"))
         rows = list(self.panel.series.items())[: self.MAX_ROWS]
         width = max(20, self.content_size.width)
         name_w = min(14, max(len(n) for n, _ in rows))
@@ -71,7 +85,8 @@ class MetricPanelView(Widget):
         for i, (name, pts) in enumerate(rows):
             if i:
                 out.append("\n")
-            color = ROW_COLORS[i % len(ROW_COLORS)]
+            rows = row_colors()
+            color = rows[i % len(rows)]
             faded = bool(self.highlight) and name not in self.highlight
             mod = " dim" if faded else (" bold" if self.highlight else "")
             out.append(name[:name_w].ljust(name_w), style=color + mod)
@@ -81,9 +96,9 @@ class MetricPanelView(Widget):
             latest = pts[-1] if pts else 0.0
             vstyle = ""
             if self.panel.crit is not None and latest >= self.panel.crit:
-                vstyle = "bold red"
+                vstyle = st("crit")
             elif self.panel.warn is not None and latest >= self.panel.warn:
-                vstyle = "yellow"
+                vstyle = st("warn")
             out.append(fmt_value(latest, self.panel.unit).rjust(val_w), style=vstyle)
         return out
 
@@ -99,15 +114,15 @@ def render_tree(roots: list[TNode], selected: str | None, path: set[str], legend
     out = Text()
 
     def walk(node: TNode, prefix: str, last: bool, parent: TNode | None) -> None:
-        line = Text(prefix, style="dim")
+        line = Text(prefix, style=st("dim"))
         if parent is not None:
             on_path = node.eid in path and parent.eid in path
-            line.append("└─ " if last else "├─ ", style="bold magenta" if on_path else "dim")
+            line.append("└─ " if last else "├─ ", style=st("path") if on_path else st("dim"))
         label = node.label.copy()
         if node.eid and node.eid == selected:
             label.stylize("reverse")
         elif node.eid in path:
-            label.stylize("bold")
+            label.stylize(st("strong"))
         line.append_text(label)
         out.append_text(line)
         out.append("\n")

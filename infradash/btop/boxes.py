@@ -453,7 +453,7 @@ class GuestsBox(BtopBox):
             for x in range(1, cv.w - 1):
                 cv.bold[yy][x] = True
         else:
-            cv.fill_bg(1, yy, cv.w - 2, "#2a1a1a")
+            cv.fill_bg(1, yy, cv.w - 2, c("guest_alt_bg"))
 
     def bx_scrollbar(self, cv: Canvas, y0: int, vis: int, scroll: int, n: int) -> None:
         if n <= vis or vis < 3:
@@ -581,7 +581,7 @@ class EventsBox(BtopBox):
                 if focus:
                     cv.fill_bg(1, yy, w - 2, c("selected_bg"), c("selected_fg"))
                 else:
-                    cv.fill_bg(1, yy, w - 2, "#20181f")
+                    cv.fill_bg(1, yy, w - 2, c("event_alt_bg"))
         if n > vis and vis >= 3:
             cv.put(w - 2, 1, "↑", c("hi_fg"), True)
             cv.put(w - 2, 1 + vis, "↓", c("hi_fg"), True)
@@ -592,10 +592,10 @@ def tree_rows(roots, selected: str | None, path: set[str]) -> list[tuple[str | N
     out: list[tuple[str | None, Text]] = []
 
     def walk(node, prefix: str, last: bool, parent) -> None:
-        line = Text(prefix, style="#606060")
+        line = Text(prefix, style=c("tree_fg"))
         if parent is not None:
             on_path = node.eid in path and parent.eid in path
-            line.append("└─ " if last else "├─ ", style=c("hi_fg") if on_path else "#606060")
+            line.append("└─ " if last else "├─ ", style=c("hi_fg") if on_path else c("tree_fg"))
         label = node.label.copy()
         if node.eid in path:
             label.stylize("bold")

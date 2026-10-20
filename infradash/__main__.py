@@ -22,10 +22,14 @@ def main() -> None:
     mode.add_argument("-c", "--config", help="YAML config with opnsense: and/or proxmox: sections")
     ap.add_argument("--refresh", type=float, help="seconds between polls")
     ap.add_argument("--classic", action="store_true", help="use the original (non-btop) layout")
+    ap.add_argument("--theme", choices=["marathon", "btop"],
+                    help="colour theme (default: the config's theme:, else marathon)")
     args = ap.parse_args()
 
+    from .btop.theme import DEFAULT_THEME, set_theme
     from .collector import Collector
 
+    cfg: dict = {}
     if args.demo:
         from .demo import DemoProvider
         provider, refresh = DemoProvider(), args.refresh or 2.0
@@ -40,6 +44,11 @@ def main() -> None:
             refresh = args.refresh or _seconds(cfg.get("refresh", "5s"))
         except (KeyError, ValueError) as e:
             sys.exit(f"config error: {e}")
+    try:
+        set_theme(args.theme or cfg.get("theme") or DEFAULT_THEME)
+    except ValueError as e:
+        sys.exit(f"config error: {e}")
+    # The interface modules read the theme when imported, so import them only now.
     if args.classic:
         from .app import InfraDash
         InfraDash(Collector(provider), refresh).run()
